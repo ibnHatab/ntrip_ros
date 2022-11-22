@@ -1,110 +1,104 @@
 #!/usr/bin/python
 
-import rospy
+import subprocess
+import signal
+import datetime
 
-#from nmea_msgs.msg import Sentence
+import rospy
+from pyrtcm import RTCMReader
 from mavros_msgs.msg import RTCM
 
-import datetime
-from http.client import HTTPConnection
-from base64 import b64encode
-from threading import Thread
 
-class ntripconnect(Thread):
-    def __init__(self, ntc):
-        super(ntripconnect, self).__init__()
-        self.ntc = ntc
-        self.stop = False
+class NtripConnect:
+
+    def __init__(self):
+
+        try:
+            self.rtcm_topic = rospy.get_param('~rtcm_topic', '/rtcm')
+            self.ntrip_client = rospy.get_param('~ntrip_client', 'ntripclient')
+            self.ntrip_server = rospy.get_param('~ntrip_server', 'rtk2go.com')
+            self.ntrip_port = rospy.get_param('~ntrip_port', '2101')
+            self.ntrip_user = rospy.get_param('~ntrip_user', 'user')
+            self.ntrip_pass = rospy.get_param('~ntrip_pass', 'password')
+            self.ntrip_stream = rospy.get_param('~ntrip_stream', 'NEAR3')
+            self.nmea_gga = rospy.get_param('~nmea_gga', '$GPGGA,')
+        except KeyError as ex:
+            rospy.logerr(ex)
+            raise
+
+        self.pub = rospy.Publisher(self.rtcm_topic, RTCM, queue_size=10)
+
+        self.p = None
+        rospy.on_shutdown(self.switch_off)
+
+    def switch_off(self):
+        if self.p:
+            self.p.send_signal(signal.SIGTERM)
+            self.p = None
+            rospy.sleep(3)
+
 
     def run(self):
-        auth = str(self.ntc.ntrip_user) + ':' + self.ntc.ntrip_pass
-        headers = {
-            'Ntrip-Version': 'Ntrip/2.0',
-            'User-Agent': 'NTRIP ntrip_ros',
-            'Connection': 'close',
-            'Authorization': 'Basic ' + str(b64encode(auth.encode('utf-8')))
-        }
-        connection = HTTPConnection(self.ntc.ntrip_server)
+
         now = datetime.datetime.utcnow()
-        nmeadata = self.ntc.nmea_gga % (now.hour, now.minute, now.second)
+        now_str = '%02d%02d%04.2f' % (now.hour, now.minute, now.second)
+        nmeadata = self.nmea_gga.split(',')
+        nmeadata[1] = now_str   # update time
+        nmeadata = ','.join(nmeadata[:-1])+','  # strip checksum
+        if nmeadata.startswith('$'):
+            nmeadata = nmeadata[1:]
 
         csum = 0
         for c in nmeadata:
-               # XOR'ing value of csum against the next char in line
-               # and storing the new XOR value in csum
-               if ord(c)!=',':
-                  csum ^= ord(c)
-
+            # XOR'ing value of csum against the next char in line
+            # and storing the new XOR value in csum
+            if ord(c)!=',': csum ^= ord(c)
         #convert hex characters to upper case
         csum = hex(csum).upper()
-
         #add 0x0 if checksum value is less than 0x10
         if len(csum)==3:
             csum='0'+csum[2]
         else:
             csum=csum[2:4]
 
-        nmeastring = '$'+nmeadata+'*'+csum+'\r\n'
+        nmeastring = nmeadata+'*'+csum
+        command = "%s -s %s -r %s -u %s -p %s -m %s -n '%s' -M 4" % \
+            (
+                self.ntrip_client,
+                self.ntrip_server,
+                self.ntrip_port,
+                self.ntrip_user,
+                self.ntrip_pass,
+                self.ntrip_stream,
+                nmeastring,
+            )
 
-        connection.request('GET', '/'+self.ntc.ntrip_stream,nmeastring,headers)
+        self.p = subprocess.Popen(command,
+                                  stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE,
+                                  shell=True,
+                                  executable='/bin/bash')
 
-        response = connection.getresponse()
-        if response.status != 200: raise Exception("blah")
-        buf = ""
         rmsg = RTCM()
         r = rospy.Rate(10)
-
-        import pdb
-        pdb.set_trace()
-
-        while not self.stop:
-            data = response.read(1)
-            print('>>', data)
-            if data!=chr(211):
-                continue
-            l1 = ord(response.read(1))
-            l2 = ord(response.read(1))
-            pkt_len = ((l1&0x3)<<8)+l2
-
-            pkt = response.read(pkt_len)
-            print(pkt)
-            parity = response.read(3)
-            if len(pkt) != pkt_len:
-                rospy.logerr("Length error: {} {}".format(len(pkt), pkt_len))
-                continue
+        rtr = RTCMReader(self.p.stdout)
+        for (raw_data, parsed_data) in rtr.iterate():
+            #print(parsed_data)
             rmsg.header.seq += 1
             rmsg.header.stamp = rospy.get_rostime()
-            rmsg.data = data + chr(l1) + chr(l2) + pkt + parity
-            self.ntc.pub.publish(rmsg)
+            rmsg.data = raw_data
+            self.pub.publish(rmsg)
+
+            if rospy.is_shutdown():
+                break
             r.sleep()
 
-        connection.close()
-
-
-class ntripclient:
-    def __init__(self):
-        rospy.init_node('ntripclient', anonymous=True)
-
-        self.rtcm_topic = rospy.get_param('~rtcm_topic','/rtcm')
-        self.nmea_topic = rospy.get_param('~nmea_topic', 'nmea')
-
-        self.ntrip_server = rospy.get_param('~ntrip_server')
-        self.ntrip_user = rospy.get_param('~ntrip_user')
-        self.ntrip_pass = rospy.get_param('~ntrip_pass')
-        self.ntrip_stream = rospy.get_param('~ntrip_stream')
-        self.nmea_gga = rospy.get_param('~nmea_gga')
-
-        self.pub = rospy.Publisher(self.rtcm_topic, RTCM, queue_size=10)
-
-        self.connection = None
-        self.connection = ntripconnect(self)
-        self.connection.start()
-
-    def run(self):
-        rospy.spin()
-        if self.connection is not None:
-            self.connection.stop = True
 
 if __name__ == '__main__':
-    c = ntripclient()
-    c.run()
+    rospy.init_node('ntrip_connect_node')
+    try:
+        client = NtripConnect()
+        # Wait for shutdown signal to close rosbag record
+        client.run()
+    except rospy.ROSInterruptException:
+        pass
