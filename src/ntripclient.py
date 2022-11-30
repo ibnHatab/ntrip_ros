@@ -61,7 +61,7 @@ class NtripConnect:
         else:
             csum=csum[2:4]
 
-        nmeastring = nmeadata+'*'+csum
+        nmeastring = '$'+nmeadata+'*'+csum
         command = "%s -s %s -r %s -u %s -p %s -m %s -n '%s' -M 4" % \
             (
                 self.ntrip_client,
@@ -78,12 +78,13 @@ class NtripConnect:
                                   stdout=subprocess.PIPE,
                                   shell=True,
                                   executable='/bin/bash')
+        print(command)
 
         rmsg = RTCM()
         r = rospy.Rate(10)
         rtr = RTCMReader(self.p.stdout)
         for (raw_data, parsed_data) in rtr.iterate():
-            #print(parsed_data)
+            # print(parsed_data)
             rmsg.header.seq += 1
             rmsg.header.stamp = rospy.get_rostime()
             rmsg.data = raw_data
