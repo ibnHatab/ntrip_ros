@@ -84,7 +84,7 @@ class NtripConnect:
         r = rospy.Rate(10)
         rtr = RTCMReader(self.p.stdout)
         for (raw_data, parsed_data) in rtr.iterate():
-            # print(parsed_data)
+            # print(rmsg.header.seq, parsed_data)
             rmsg.header.seq += 1
             rmsg.header.stamp = rospy.get_rostime()
             rmsg.data = raw_data
